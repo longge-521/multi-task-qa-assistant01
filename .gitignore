@@ -205,3 +205,18 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# --- Custom Project Ignores ---
+
+# Backend DB & Logs
+*.db
+chat_history.db
+*.log
+app.log
+
+# Frontend (Vue/Vite)
+Frontend/node_modules/
+Frontend/dist/
+Frontend/dist-ssr/
+Frontend/.vite/
+*.local
