@@ -1,13 +1,14 @@
 import os
 from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
+from src.config import settings
 
 def init_llm(model_name="deepseek-chat"):
     """
     Initialize the DeepSeek LLM through Langchain's ChatOpenAI compatible interface.
     """
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+    api_key = settings.DEEPSEEK_API_KEY
+    api_base = settings.DEEPSEEK_API_BASE
     
     if not api_key or api_key == "sk-please_replace_me":
         raise ValueError("Please set a valid DEEPSEEK_API_KEY in the .env file.")
@@ -19,6 +20,7 @@ def init_llm(model_name="deepseek-chat"):
         base_url=api_base,
         max_tokens=2048,
         temperature=0.1 if model_name == "deepseek-chat" else 1.0, # Reasoner usually recommends temp=1.0 or 0
+        streaming=True, # Enable streaming for all models
     )
     return llm
 

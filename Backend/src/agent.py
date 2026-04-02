@@ -48,35 +48,64 @@ def build_agent(model_name="deepseek-chat"):
 # Cache for initialized agents per model
 _agents = {}
 
-def get_agent_response(session_id: str, query: str, model: str = "deepseek-chat"):
+import json
+
+async def stream_agent_response(session_id: str, query: str, model: str = "deepseek-chat"):
     """
-    Drives the agent with history logic and extracts structured output.
-    Uses the requested model for inference.
+    Async generator that streams agent events (thoughts, tool calls, and final tokens).
     """
     global _agents
     
-    # Lazy init agent for the requested model
     if model not in _agents:
-        logger.info(f"Initializing multi-task agent for model: {model}")
+        logger.info(f"Initializing streaming agent for model: {model}")
         _agents[model] = build_agent(model_name=model)
         
     system_agent = _agents[model]
+    logger.info(f"Agent ({model}) starting STREAMING with query: '{query}'")
     
-    logger.info(f"Agent ({model}) invoking with query: '{query}'")
-    
-    response = system_agent.invoke(
+    async for event in system_agent.astream_events(
+        {"input": query},
+        version="v1",
+        config={"configurable": {"session_id": session_id}}
+    ):
+        kind = event["event"]
+        if kind == "on_tool_start":
+            yield json.dumps({"type": "tool_start", "tool": event["name"], "input": event["data"].get("input")}) + "\n"
+        elif kind == "on_tool_end":
+             yield json.dumps({"type": "tool_end", "tool": event["name"], "output": str(event["data"].get("output"))}) + "\n"
+        elif kind == "on_chat_model_stream":
+            chunk = event["data"]["chunk"]
+            # To handle DeepSeek R1 reasoning_content
+            reasoning = chunk.additional_kwargs.get("reasoning_content")
+            if reasoning:
+                yield json.dumps({"type": "thought", "content": reasoning}) + "\n"
+            
+            content = chunk.content
+            if content:
+                yield json.dumps({"type": "token", "content": content}) + "\n"
+
+    yield json.dumps({"type": "end"}) + "\n"
+
+async def get_agent_response(session_id: str, query: str, model: str = "deepseek-chat"):
+    """
+    Standard asynchronous agent call (non-streaming).
+    Useful for simple requests or when streaming is not needed.
+    """
+    global _agents
+    if model not in _agents:
+        logger.info(f"Initializing agent for model: {model}")
+        _agents[model] = build_agent(model_name=model)
+        
+    system_agent = _agents[model]
+    response = await system_agent.ainvoke(
         {"input": query},
         config={"configurable": {"session_id": session_id}}
     )
     
-    # Extract intermediate steps (tools used)
     tools_used = []
     if "intermediate_steps" in response:
         for action, observation in response["intermediate_steps"]:
-            tools_used.append({
-                "tool": action.tool,
-                "tool_input": action.tool_input
-            })
+            tools_used.append({"tool": action.tool, "tool_input": action.tool_input})
             
     return {
         "answer": response["output"],

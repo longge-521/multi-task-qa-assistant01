@@ -1,11 +1,15 @@
-import os
-import traceback
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from dotenv import load_dotenv
+import uvicorn
+from fastapi import FastAPI, HTTPException, Body
+from fastapi.middleware.cors import CORSMiddleware
 import logging
+from typing import List
 
-# Configure basic logging
+from src.config import settings
+from src.schemas import ChatRequest, ChatResponse, ToolsListResponse, ToolMetadata
+from src.agent import get_agent_response, get_agent_tools
+
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -16,81 +20,94 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables, overriding system ones if existing in .env
-load_dotenv(override=True)
+# Initialize FastAPI App
+app = FastAPI(
+    title="Multi-Task QA Assistant API",
+    description="FastAPI powered agent with tool-calling capabilities",
+    version="2.0.0"
+)
 
-from src.agent import get_agent_response
-from src.tools import get_agent_tools
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-app = Flask(__name__)
-# Enable CORS for cross-origin requests from the Vue frontend
-CORS(app)
-
-@app.route('/api/tools', methods=['GET'])
-def get_tools():
+@app.get("/api/tools", response_model=ToolsListResponse)
+async def get_tools():
     """
     Returns dynamically the list of all registered agent tools with their metadata.
-    The frontend uses this to build the welcome message at startup.
     """
-    # Human-readable Chinese display labels for each tool name
     tool_labels = {
         "get_weather": "实时天气",
         "search_news": "新闻搜索",
         "get_stock":   "A股涨停",
+        "search_local_knowledge": "文档知识库",
     }
-    # Icon identifiers for each tool (interpreted by the frontend)
     tool_icons = {
         "get_weather": "weather",
         "search_news": "news",
         "get_stock":   "stock",
+        "search_local_knowledge": "knowledge",
     }
 
     tools_info = []
     for tool in get_agent_tools:
-        # LangChain tool.description includes function signature like:
-        # "get_weather(location: str) -> str - 获取指定城市..."
-        # We strip everything before ' - ' to get just the clean docstring.
         raw_desc = tool.description or ""
+        # Handle different docstring formats
         if " - " in raw_desc:
             clean_desc = raw_desc.split(" - ", 1)[1].strip()
         else:
             clean_desc = raw_desc.strip()
 
-        tools_info.append({
-            "name": tool.name,
-            "label": tool_labels.get(tool.name, tool.name),
-            "icon":  tool_icons.get(tool.name, "default"),
-            "description": clean_desc,
-        })
-
-    logger.info(f"Serving tools list: {[t['name'] for t in tools_info]}")
-    return jsonify({"tools": tools_info})
-
-@app.route('/api/chat', methods=['POST'])
-def chat():
-    """
-    Main endpoint for the multi-task QA assistant.
-    Expected JSON: { "session_id": "user123", "query": "...", "model": "deepseek-chat" }
-    """
-    data = request.json
-    session_id = data.get("session_id", "default_session")
-    query = data.get("query")
-    model = data.get("model", "deepseek-chat") # Default to chat model
+        tools_info.append(ToolMetadata(
+            name=tool.name,
+            label=tool_labels.get(tool.name, tool.name),
+            icon=tool_icons.get(tool.name, "default"),
+            description=clean_desc
+        ))
     
-    if not query:
-        return jsonify({"error": "Query is required"}), 400
-    
-    logger.info(f"Received query from session_id: {session_id} - Query: {query} - Model: {model}")
+    return ToolsListResponse(tools=tools_info)
 
+from fastapi.responses import StreamingResponse
+from src.agent import get_agent_response, stream_agent_response, get_agent_tools
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    Main chat endpoint using FastAPI and Pydantic validation (non-streaming).
+    """
+    logger.info(f"Received query: {request.query} - Model: {request.model}")
     try:
-        # Pass the selected model to the agent logic
-        result = get_agent_response(session_id, query, model=model)
-        logger.info(f"Successfully generated response for session: {session_id}")
-        return jsonify(result)
+        result = await get_agent_response(
+            session_id=request.session_id, 
+            query=request.query, 
+            model=request.model
+        )
+        return ChatResponse(**result)
     except Exception as e:
-        logger.error(f"Error handling /api/chat request: {str(e)}", exc_info=True)
-        return jsonify({"error": f"Internal Server Error: {str(e)}"}), 500
+        logger.error(f"Chat error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
-if __name__ == '__main__':
-    debug_mode = os.getenv('FLASK_DEBUG', '1') == '1'
-    app.run(host='0.0.0.0', port=5000, debug=debug_mode)
+@app.post("/api/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """
+    Streaming chat endpoint using Server-Sent Events (SSE).
+    """
+    logger.info(f"Received STREAMING query: {request.query} - Model: {request.model}")
+    return StreamingResponse(
+        stream_agent_response(request.session_id, request.query, request.model),
+        media_type="text/event-stream"
+    )
+
+if __name__ == "__main__":
+    logger.info(f"Starting FastAPI server on {settings.APP_HOST}:{settings.APP_PORT}")
+    uvicorn.run(
+        "app:app", 
+        host=settings.APP_HOST, 
+        port=settings.APP_PORT, 
+        reload=settings.DEBUG
+    )
