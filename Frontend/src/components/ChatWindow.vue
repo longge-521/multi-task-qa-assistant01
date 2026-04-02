@@ -150,27 +150,83 @@ const handleCardClick = async (tool) => {
   }
 };
 
-// Refactored helper to handle the actual API call without UI management
+// Refactored helper to handle the actual API call WITH streaming support
 const performChatQuery = async (query) => {
   isLoading.value = true;
   await scrollToBottom();
 
   const tempAiMsgIndex = messages.value.length;
-  messages.value.push({ role: 'assistant', text: '', loading: true });
+  messages.value.push({ 
+    role: 'assistant', 
+    text: '', 
+    usedTools: [],
+    loading: true 
+  });
   await scrollToBottom();
 
   try {
-    const res = await sendChatMessage(sessionId, query, selectedModel.value);
-    messages.value[tempAiMsgIndex] = {
-      role: 'assistant',
-      text: res.answer,
-      usedTools: res.tools_used || [],
-      loading: false
-    };
+    // We use a clean fetch for streaming since it's easier to handle ReadableStreams
+    const response = await fetch('http://localhost:5000/api/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        query: query,
+        model: selectedModel.value
+      })
+    });
+
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    
+            messages.value[tempAiMsgIndex].loading = false;
+            messages.value[tempAiMsgIndex].thought = '';
+
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              
+              const chunk = decoder.decode(value, { stream: true });
+              const lines = chunk.split('\n');
+              
+              for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                  const data = JSON.parse(line);
+                  
+                  if (data.type === 'token') {
+                    messages.value[tempAiMsgIndex].text += data.content;
+                  } else if (data.type === 'thought') {
+                    messages.value[tempAiMsgIndex].thought += data.content;
+                  } else if (data.type === 'tool_start') {
+                    messages.value[tempAiMsgIndex].usedTools.push({
+                      tool: data.tool,
+                      tool_input: data.input,
+                      status: 'running'
+                    });
+                  } else if (data.type === 'tool_end') {
+                    // Find the active tool and update its result
+                    const toolIdx = messages.value[tempAiMsgIndex].usedTools.findIndex(t => t.tool === data.tool && t.status === 'running');
+                    if (toolIdx !== -1) {
+                      messages.value[tempAiMsgIndex].usedTools[toolIdx].status = 'done';
+                      messages.value[tempAiMsgIndex].usedTools[toolIdx].output = data.output;
+                    }
+                  } else if (data.type === 'end') {
+                    break;
+                  }
+                } catch (e) {
+                  console.warn("Error parsing stream chunk:", e, line);
+                }
+              }
+              // Trigger scroll during streaming
+              await scrollToBottom();
+            }
   } catch (error) {
     messages.value[tempAiMsgIndex] = {
       role: 'assistant',
-      text: '服务器遇到了问题，请稍后再试。详情：' + (error.message || '未知错误'),
+      text: '服务器通信异常，请检查网络或后端服务。' + (error.message || ''),
       isError: true,
       loading: false
     };
@@ -224,6 +280,15 @@ const performChatQuery = async (query) => {
                 </svg>
                 &nbsp;{{ t.tool }}
               </span>
+            </div>
+
+            <!-- Thinking / Reasoning section -->
+            <div v-if="msg.thought" class="thought-container">
+              <div class="thought-header">
+                <span class="thought-icon">🧠</span>
+                <span class="thought-label">思考过程</span>
+              </div>
+              <div class="thought-content">{{ msg.thought }}</div>
             </div>
 
             <!-- Message text -->
@@ -436,6 +501,37 @@ const performChatQuery = async (query) => {
   font-size: 0.78rem;
   opacity: 0.85;
   line-height: 1.5;
+}
+
+/* Thought / Reasoning Styles */
+.thought-container {
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 2px solid var(--accent-color);
+  border-radius: 4px;
+  margin: 0.5rem 0 1rem 0;
+  padding: 0.8rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  animation: fadeIn 0.5s ease-out;
+}
+
+.thought-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-weight: 600;
+  color: var(--accent-color);
+  opacity: 0.9;
+}
+
+.thought-icon { font-size: 0.9rem; }
+
+.thought-content {
+  white-space: pre-wrap;
+  font-style: italic;
+  line-height: 1.5;
+  opacity: 0.8;
 }
 
 /* Used tools badges (on AI response messages) */
