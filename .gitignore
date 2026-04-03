@@ -208,8 +208,8 @@ __marimo__/
 
 # --- Custom Project Ignores ---
 
-# docs (plans, specs, generated images)
-docs/
+# docs - ignore superpowers auto-generated plans/specs, keep images for README
+docs/superpowers/
 
 # Backend DB & Logs
 *.db
