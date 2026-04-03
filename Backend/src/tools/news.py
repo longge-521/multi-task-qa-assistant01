@@ -1,7 +1,7 @@
 from langchain_core.tools import tool
 import logging
 import time
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 
 logger = logging.getLogger(__name__)
 
