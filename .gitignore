@@ -208,11 +208,31 @@ __marimo__/
 
 # --- Custom Project Ignores ---
 
+# docs (plans, specs, generated images)
+docs/
+
 # Backend DB & Logs
 *.db
 chat_history.db
 *.log
 app.log
+
+# Backend knowledge pipeline artifacts (runtime generated)
+Backend/knowledge/upload_doc/
+Backend/knowledge/load_doc/
+Backend/knowledge/chunk_doc/
+Backend/knowledge/embedding_doc/
+Backend/knowledge/vector_store/
+Backend/knowledge/_processing/
+
+# Backend vector index (rebuilt on startup)
+Backend/vector_db_index/
+
+# Backend env file (contains API keys)
+Backend/.env
+
+# Backend test scripts
+Backend/test_*.py
 
 # Frontend (Vue/Vite)
 Frontend/node_modules/
@@ -220,3 +240,19 @@ Frontend/dist/
 Frontend/dist-ssr/
 Frontend/.vite/
 *.local
+
+# Claude / Cursor AI config
+.claude/
+CLAUDE.md
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

@@ -1,19 +1,122 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue';
-import { sendChatMessage, fetchTools } from '../services/api';
+import { fetchTools } from '../services/chatService';
+import api from '../services/api';
+import * as indexService from '../services/indexService';
 
 const messages = ref([]);
 const availableTools = ref([]);
 const inputQuery = ref('');
 const isLoading = ref(false);
-const selectedModel = ref('deepseek-chat'); // 'deepseek-chat' or 'deepseek-reasoner'
+const selectedModel = ref('deepseek-chat');
 const sessionId = 'session_' + Math.random().toString(36).substr(2, 9);
 const chatContainer = ref(null);
+
+// Tool drawer state
+const toolDrawerOpen = ref(true);
+const selectedToolIcon = ref(null);
+
+const toolExamples = {
+  weather: ['查询北京实时天气', '我所在位置的天气', '上海明天天气怎么样'],
+  news:    ['最新热门新闻', '科技领域最新资讯', '今日国际新闻'],
+  stock:   ['今天A股涨停股票', '昨天涨停的股票', '上周五涨停统计'],
+  default: ['搜索知识库相关内容'],
+};
+
+const toggleDrawer = () => { toolDrawerOpen.value = !toolDrawerOpen.value; };
+
+const selectTool = (tool) => {
+  selectedToolIcon.value = selectedToolIcon.value === tool.icon ? null : tool.icon;
+};
+
+const selectedToolData = () => {
+  if (!selectedToolIcon.value) return null;
+  return availableTools.value.find(t => t.icon === selectedToolIcon.value) || null;
+};
+
+const sendExample = (text) => {
+  if (isLoading.value) return;
+  selectedToolIcon.value = null;
+  toolDrawerOpen.value = false;
+  sendQuery(text);
+};
+
+// Citation management
+const showCitationModal = ref(false);
+const currentCitation = ref(null);
 
 const scrollToBottom = async () => {
   await nextTick();
   if (chatContainer.value) {
     chatContainer.value.scrollTop = chatContainer.value.scrollHeight;
+  }
+};
+
+// 引用解析函数
+const parseCitations = (text) => {
+  if (!text) return { processedText: '', citations: [] };
+
+  const citationRegex = /\[CITATION:([^:]+):(\d+)\]/g;
+  const citationsList = [];
+  let processedText = text;
+
+  // 提取所有引用标记
+  let match;
+  while ((match = citationRegex.exec(text)) !== null) {
+    const [fullMatch, filename, chunkIndex] = match;
+    citationsList.push({ filename, chunkIndex, originalText: fullMatch });
+  }
+
+  // 如果没有找到引用标记，直接返回原始内容
+  if (citationsList.length === 0) {
+    return { processedText: text, citations: [] };
+  }
+
+  // 把所有唯一的原始文本提取出来
+  const uniqueOriginalTexts = [...new Set(citationsList.map(c => c.originalText))];
+  
+  // 创建一个映射以便一次性替换所有引用标记
+  const citationMap = {};
+  citationsList.forEach((citation, index) => {
+    const citationNumber = index + 1;
+    citationMap[citation.originalText] = `<sup class="citation-link" data-index="${index}" data-filename="${citation.filename}" data-chunk="${citation.chunkIndex}">[${citationNumber}]</sup>`;
+  });
+
+  // 使用正则表达式一次性替换所有引用标记
+  // 按照长度降序排序，确保长标记优先匹配
+  const patterns = uniqueOriginalTexts
+    .sort((a, b) => b.length - a.length)
+    .map(key => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+
+  if (patterns.length > 0) {
+    const citationPattern = new RegExp(patterns.join('|'), 'g');
+    processedText = processedText.replace(citationPattern, (match) => citationMap[match] || match);
+  }
+
+  return { processedText, citations: citationsList };
+};
+
+// 引用点击处理函数
+const handleCitationClick = async (filename, chunkIndex) => {
+  currentCitation.value = { filename, chunkIndex };
+  showCitationModal.value = true;
+
+  // 加载该文件的分块内容
+  try {
+    const data = await indexService.getChunks(filename);
+    const chunks = data.chunks || [];
+
+    // 找到对应的分块（chunkIndex是从1开始的）
+    const targetChunk = chunks.find((chunk, index) => index + 1 === parseInt(chunkIndex));
+
+    if (targetChunk) {
+      currentCitation.value.content = targetChunk.content;
+    } else {
+      currentCitation.value.content = "未找到对应的分块内容";
+    }
+  } catch (error) {
+    console.error('Failed to fetch chunk content:', error);
+    currentCitation.value.content = "加载分块内容失败";
   }
 };
 
@@ -40,8 +143,7 @@ onMounted(async () => {
     messages.value = [{
       role: 'assistant',
       isWelcome: true,
-      tools: tools,
-      text: '你好！我是您的多任务智能问答助手。\n请直接向我提问，我会自动调用合适的工具为您服务。',
+      text: '你好！我是您的多任务智能问答助手。\n直接提问或从下方工具栏选择一个工具开始。',
     }];
   } catch (e) {
     messages.value = [{
@@ -53,37 +155,18 @@ onMounted(async () => {
   await scrollToBottom();
 });
 
-// Core send logic
+const handleChatClick = (e) => {
+  const citationEl = e.target.closest('.citation-link');
+  if (citationEl) {
+    e.preventDefault();
+    handleCitationClick(citationEl.dataset.filename, citationEl.dataset.chunk);
+  }
+};
+
 const sendQuery = async (query) => {
   if (!query.trim() || isLoading.value) return;
-
   messages.value.push({ role: 'user', text: query });
-  isLoading.value = true;
-  await scrollToBottom();
-
-  const tempAiMsgIndex = messages.value.length;
-  messages.value.push({ role: 'assistant', text: '', loading: true });
-  await scrollToBottom();
-
-  try {
-    const res = await sendChatMessage(sessionId, query);
-    messages.value[tempAiMsgIndex] = {
-      role: 'assistant',
-      text: res.answer,
-      usedTools: res.tools_used || [],
-      loading: false
-    };
-  } catch (error) {
-    messages.value[tempAiMsgIndex] = {
-      role: 'assistant',
-      text: '服务器遇到了问题，请稍后再试。详情：' + (error.message || '未知错误'),
-      isError: true,
-      loading: false
-    };
-  } finally {
-    isLoading.value = false;
-    await scrollToBottom();
-  }
+  await performChatQuery(query);
 };
 
 // Input box handler
@@ -91,63 +174,6 @@ const handleSend = () => {
   const q = inputQuery.value;
   inputQuery.value = '';
   sendQuery(q);
-};
-
-// Try to get user city via browser Geolocation + OpenStreetMap reverse geocoding
-const getUserCity = () => {
-  return new Promise((resolve) => {
-    if (!navigator.geolocation) { resolve('北京'); return; }
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        try {
-          const { latitude, longitude } = pos.coords;
-          const res = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json&accept-language=zh`
-          );
-          const data = await res.json();
-          const addr = data.address || {};
-          resolve(addr.city || addr.town || addr.county || addr.state || '当前位置');
-        } catch { resolve('北京'); }
-      },
-      () => resolve('北京'),
-      { timeout: 5000 }
-    );
-  });
-};
-
-// Quick-action on tool card click
-const handleCardClick = async (tool) => {
-  if (isLoading.value) return;
-
-  if (tool.icon === 'weather') {
-    // Show a loading/feedback status in the input area or as a user message
-    // Instead of pushing twice, we just push one meaningful message
-    messages.value.push({ role: 'user', text: '📍 正在获取当前位置的天气...' });
-    await scrollToBottom();
-    
-    // We try to get the city, but with a short timeout. 
-    // If it takes more than 2s or fails, we just send "当前位置" and let the backend IP geolocator handle it.
-    const cityPromise = getUserCity();
-    const city = await Promise.race([
-      cityPromise, 
-      new Promise(resolve => setTimeout(() => resolve('当前位置'), 2000))
-    ]);
-    
-    const finalQuery = city === '当前位置' ? '帮我查一下我现在所在位置的实时天气' : `帮我查一下${city}现在的实时天气`;
-    
-    // Replace the earlier temporary message text to avoid duplication in sendQuery
-    messages.value[messages.value.length - 1].text = finalQuery;
-    
-    // Call the logic from sendQuery BUT WITHOUT its message.push part
-    // To do this, I'll extract common logic or just use a flag in sendQuery
-    await performChatQuery(finalQuery);
-  } else if (tool.icon === 'news') {
-    await sendQuery('帮我获取当前最新的热门新闻资讯');
-  } else if (tool.icon === 'stock') {
-    await sendQuery('帮我查一下今天A股所有涨停的股票');
-  } else {
-    await sendQuery(`使用 ${tool.label} 功能`);
-  }
 };
 
 // Refactored helper to handle the actual API call WITH streaming support
@@ -166,7 +192,7 @@ const performChatQuery = async (query) => {
 
   try {
     // We use a clean fetch for streaming since it's easier to handle ReadableStreams
-    const response = await fetch('http://localhost:5000/api/chat/stream', {
+    const response = await fetch(`${api.defaults.baseURL}/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -223,6 +249,12 @@ const performChatQuery = async (query) => {
               // Trigger scroll during streaming
               await scrollToBottom();
             }
+
+            // 解析streaming完成后的引用
+            const finalText = messages.value[tempAiMsgIndex].text;
+            if (finalText) {
+              messages.value[tempAiMsgIndex].citations = parseCitations(finalText);
+            }
   } catch (error) {
     messages.value[tempAiMsgIndex] = {
       role: 'assistant',
@@ -258,7 +290,7 @@ const performChatQuery = async (query) => {
     </div>
 
     <!-- Message Array -->
-    <div class="chat-container" ref="chatContainer">
+    <div class="chat-container" ref="chatContainer" @click="handleChatClick">
       <div
         v-for="(msg, index) in messages"
         :key="index"
@@ -291,33 +323,57 @@ const performChatQuery = async (query) => {
               <div class="thought-content">{{ msg.thought }}</div>
             </div>
 
-            <!-- Message text -->
-            <div class="message-text">{{ msg.text }}</div>
-
-            <!-- Welcome tool capability cards -->
-            <div v-if="msg.isWelcome && msg.tools && msg.tools.length > 0" class="tool-cards-grid">
-              <div
-                v-for="tool in msg.tools"
-                :key="tool.name"
-                class="tool-card"
-                :class="{ 'tool-card-disabled': isLoading }"
-                :style="{
-                  background: (toolColors[tool.icon] || toolColors.default).bg,
-                  borderColor: (toolColors[tool.icon] || toolColors.default).border,
-                  color: (toolColors[tool.icon] || toolColors.default).text,
-                }"
-                @click="handleCardClick(tool)"
-              >
-                <div class="tool-card-header">
-                  <span class="tool-card-icon" v-html="toolSvgIcons[tool.icon] || toolSvgIcons.default"></span>
-                  <span class="tool-card-label">{{ tool.label }}</span>
-                  <span class="tool-card-click-hint">点击体验 →</span>
-                </div>
-                <div class="tool-card-desc">{{ tool.description }}</div>
-              </div>
-            </div>
+            <!-- Message text with citation support -->
+            <div class="message-text" v-html="msg.citations?.processedText || msg.text || ''"></div>
           </div>
 
+        </div>
+      </div>
+    </div>
+
+    <!-- Tool drawer + detail strip -->
+    <div class="tool-drawer" v-if="availableTools.length > 0">
+      <button class="drawer-toggle" @click="toggleDrawer">
+        <span class="drawer-toggle-icon">🔧</span>
+        <span>{{ availableTools.length }} 个可用工具</span>
+        <span class="drawer-arrow" :class="{ open: toolDrawerOpen }">▾</span>
+      </button>
+
+      <div v-if="toolDrawerOpen" class="drawer-body">
+        <div class="drawer-list">
+          <button
+            v-for="tool in availableTools"
+            :key="tool.name"
+            class="drawer-item"
+            :class="{ active: selectedToolIcon === tool.icon }"
+            :style="{
+              '--item-border': (toolColors[tool.icon] || toolColors.default).border,
+              '--item-text': (toolColors[tool.icon] || toolColors.default).text,
+              '--item-bg': (toolColors[tool.icon] || toolColors.default).bg,
+            }"
+            @click="selectTool(tool)"
+          >
+            <span class="drawer-item-icon" v-html="toolSvgIcons[tool.icon] || toolSvgIcons.default"></span>
+            <span class="drawer-item-label">{{ tool.label }}</span>
+          </button>
+        </div>
+
+        <!-- Detail strip -->
+        <div v-if="selectedToolData()" class="detail-strip">
+          <div class="detail-header">
+            <span class="detail-icon" v-html="toolSvgIcons[selectedToolData().icon] || toolSvgIcons.default"></span>
+            <span class="detail-name">{{ selectedToolData().label }}</span>
+          </div>
+          <p class="detail-desc">{{ selectedToolData().description }}</p>
+          <div class="detail-examples">
+            <button
+              v-for="(ex, idx) in (toolExamples[selectedToolData().icon] || toolExamples.default)"
+              :key="idx"
+              class="example-chip"
+              :disabled="isLoading"
+              @click="sendExample(ex)"
+            >{{ ex }}</button>
+          </div>
         </div>
       </div>
     </div>
@@ -326,10 +382,30 @@ const performChatQuery = async (query) => {
       <input
         v-model="inputQuery"
         @keyup.enter="handleSend"
-        placeholder="问我想要知道的事情..."
+        placeholder="输入问题，或从上方选择工具..."
         :disabled="isLoading"
       />
       <button @click="handleSend" :disabled="isLoading || !inputQuery.trim()">发送</button>
+    </div>
+
+    <!-- 引用详情模态框 -->
+    <div v-if="showCitationModal" class="citation-modal-overlay" @click.self="showCitationModal = false">
+      <div class="citation-modal">
+        <div class="modal-header">
+          <h3>引用详情</h3>
+          <button class="close-btn" @click="showCitationModal = false">×</button>
+        </div>
+        <div class="modal-content">
+          <div v-if="currentCitation">
+            <p><strong>文件：</strong>{{ currentCitation.filename }}</p>
+            <p><strong>分块索引：</strong>{{ currentCitation.chunkIndex }}</p>
+            <div class="citation-content">
+              <h4>原文内容：</h4>
+              <pre>{{ currentCitation.content }}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -337,13 +413,11 @@ const performChatQuery = async (query) => {
 <style scoped>
 .chat-wrapper {
   background: var(--surface-color);
-  border-radius: 16px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  border-radius: 0;
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.05);
   position: relative;
 }
 
@@ -351,33 +425,34 @@ const performChatQuery = async (query) => {
 .model-selector-container {
   display: flex;
   justify-content: center;
-  padding: 1rem 0;
+  padding: 0.45rem 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   background: rgba(15, 23, 42, 0.3);
+  flex-shrink: 0;
 }
 
 .model-selector-pill {
   display: flex;
   background: rgba(0, 0, 0, 0.2);
-  padding: 4px;
-  border-radius: 24px;
+  padding: 3px;
+  border-radius: 20px;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  gap: 4px;
+  gap: 2px;
 }
 
 .model-btn {
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  padding: 6px 16px;
-  border-radius: 20px;
-  font-size: 0.85rem;
+  padding: 4px 12px;
+  border-radius: 16px;
+  font-size: 0.75rem;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.2s;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
 }
 
 .model-btn:hover:not(.active) {
@@ -388,20 +463,20 @@ const performChatQuery = async (query) => {
 .model-btn.active {
   background: var(--accent-color);
   color: white;
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.35);
 }
 
 .model-btn .icon {
-  font-size: 1rem;
+  font-size: 0.8rem;
 }
 
 .chat-container {
   flex: 1;
   overflow-y: auto;
-  padding: 1.5rem;
+  padding: 0.75rem;
   display: flex;
   flex-direction: column;
-  gap: 1.2rem;
+  gap: 0.6rem;
   scroll-behavior: smooth;
 }
 
@@ -410,11 +485,11 @@ const performChatQuery = async (query) => {
 .row-ai  { justify-content: flex-start; }
 
 .message-bubble {
-  max-width: 85%;
-  padding: 1rem 1.2rem;
-  border-radius: 12px;
-  line-height: 1.7;
-  font-size: 0.95rem;
+  max-width: 90%;
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  line-height: 1.55;
+  font-size: 0.82rem;
   animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
   opacity: 0;
   transform: translateY(10px) scale(0.95);
@@ -439,68 +514,147 @@ const performChatQuery = async (query) => {
   word-wrap: break-word;
 }
 
-/* Tool cards for welcome message */
-.tool-cards-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 0.75rem;
-  margin-top: 1rem;
+/* ─── Tool Drawer ─── */
+.tool-drawer {
+  flex-shrink: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(15, 23, 42, 0.55);
 }
 
-.tool-card {
-  border: 1px solid;
-  border-radius: 10px;
-  padding: 0.75rem 0.9rem;
-  transition: transform 0.2s, box-shadow 0.2s, opacity 0.2s;
-  cursor: pointer;
-  user-select: none;
-}
-
-.tool-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-}
-
-.tool-card:active {
-  transform: translateY(-1px) scale(0.98);
-}
-
-.tool-card-disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  pointer-events: none;
-}
-
-.tool-card-header {
+.drawer-toggle {
+  width: 100%;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
+  padding: 0.5rem 0.75rem;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.drawer-toggle:hover { color: var(--text-primary); }
+.drawer-toggle-icon { font-size: 0.8rem; }
+
+.drawer-arrow {
+  margin-left: auto;
+  font-size: 0.7rem;
+  transition: transform 0.2s;
+}
+
+.drawer-arrow.open { transform: rotate(180deg); }
+
+.drawer-body {
+  padding: 0 0.6rem 0.5rem;
+}
+
+.drawer-list {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.drawer-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.38rem 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.drawer-item:hover {
+  border-color: var(--item-border);
+  color: var(--item-text);
+  background: var(--item-bg);
+}
+
+.drawer-item.active {
+  border-color: var(--item-border);
+  color: var(--item-text);
+  background: var(--item-bg);
+  box-shadow: 0 0 0 1px var(--item-border);
+}
+
+.drawer-item-icon { display: flex; align-items: center; }
+.drawer-item-icon :deep(svg) { width: 14px; height: 14px; }
+
+.drawer-item-label { white-space: nowrap; }
+
+/* ─── Detail Strip ─── */
+.detail-strip {
+  margin-top: 0.45rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  animation: fadeSlideIn 0.15s ease-out;
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.84rem;
   font-weight: 600;
-  font-size: 0.85rem;
+  color: var(--text-primary);
+  margin-bottom: 0.25rem;
+}
+
+.detail-icon { display: flex; align-items: center; }
+.detail-icon :deep(svg) { width: 15px; height: 15px; }
+
+.detail-name { letter-spacing: 0.01em; }
+
+.detail-desc {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
   margin-bottom: 0.4rem;
 }
 
-.tool-card-icon { display: flex; align-items: center; flex-shrink: 0; }
+.detail-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
 
-.tool-card-label { letter-spacing: 0.02em; flex: 1; }
-
-.tool-card-click-hint {
-  font-size: 0.7rem;
-  opacity: 0.6;
-  font-weight: 400;
-  letter-spacing: 0;
+.example-chip {
+  padding: 0.25rem 0.55rem;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 12px;
+  background: rgba(59, 130, 246, 0.08);
+  color: #93c5fd;
+  font-size: 0.74rem;
+  cursor: pointer;
+  transition: all 0.15s;
   white-space: nowrap;
-  transition: opacity 0.2s;
 }
 
-.tool-card:hover .tool-card-click-hint {
-  opacity: 1;
+.example-chip:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: rgba(59, 130, 246, 0.5);
+  color: #bfdbfe;
 }
 
-.tool-card-desc {
-  font-size: 0.78rem;
-  opacity: 0.85;
-  line-height: 1.5;
+.example-chip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* Thought / Reasoning Styles */
@@ -558,9 +712,10 @@ const performChatQuery = async (query) => {
 /* Input container */
 .input-container {
   display: flex;
-  padding: 1rem;
+  padding: 0.5rem 0.6rem;
   background: rgba(15, 23, 42, 0.5);
   border-top: 1px solid var(--tool-border);
+  flex-shrink: 0;
 }
 
 .input-container input {
@@ -568,33 +723,34 @@ const performChatQuery = async (query) => {
   background: var(--bg-color);
   border: 1px solid var(--tool-border);
   color: var(--text-primary);
-  padding: 0.8rem 1.2rem;
-  border-radius: 20px;
-  font-size: 1rem;
+  padding: 0.5rem 0.8rem;
+  border-radius: 16px;
+  font-size: 0.82rem;
   outline: none;
-  transition: all 0.3s;
+  transition: all 0.2s;
 }
 
 .input-container input:focus {
   border-color: var(--accent-color);
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
 }
 
 .input-container button {
   background: var(--accent-color);
   color: white;
   border: none;
-  padding: 0 1.5rem;
-  margin-left: 0.8rem;
-  border-radius: 20px;
+  padding: 0 1rem;
+  margin-left: 0.5rem;
+  border-radius: 16px;
+  font-size: 0.8rem;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.15s;
 }
 
 .input-container button:hover:not(:disabled) {
   background: var(--accent-hover);
-  transform: translateY(-2px);
+  transform: translateY(-1px);
 }
 
 .input-container button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -616,5 +772,91 @@ const performChatQuery = async (query) => {
 
 @keyframes popIn {
   to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* 引用角标样式 */
+.citation-link {
+  color: #4f46e5;
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 0.8em;
+  margin: 0 2px;
+}
+
+.citation-link:hover {
+  color: #4338ca;
+}
+
+/* 引用模态框样式 */
+.citation-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.citation-modal {
+  background: white;
+  border-radius: 8px;
+  width: 600px;
+  max-width: 90%;
+  max-height: 80%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  padding: 1rem;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modal-header h3 {
+  margin: 0;
+  color: #374151;
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: #6b7280;
+}
+
+.modal-content {
+  padding: 1rem;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.citation-content {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: #f9fafb;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+}
+
+.citation-content h4 {
+  margin: 0 0 0.5rem 0;
+  color: #374151;
+}
+
+.citation-content pre {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: inherit;
+  line-height: 1.5;
+  margin: 0;
 }
 </style>
