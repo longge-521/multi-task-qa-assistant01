@@ -4,7 +4,8 @@
 
 ## 界面预览
 
-![首页截图](docs/images/homepage.png)
+<img width="2157" height="1248" alt="image" src="https://github.com/user-attachments/assets/1b3c308d-5430-479f-869b-d6931c82ab55" />
+
 
 > 左侧：RAG 知识库管理面板（文档上传、解析、切块、向量化全流程）｜右侧：智能对话面板（可折叠工具抽屉 + 示例提问）
 
